@@ -343,6 +343,8 @@ class QBSession(Session):
                     pass  # no MySQL equivalent, skip
                 elif "binary" in mysql_type and not def_lower.startswith("'") and not def_lower.startswith("0x"):
                     pass  # skip invalid non-binary defaults for binary columns
+                elif '"' in str(default) or '(' in def_lower:
+                    pass  # skip SA17 computed/function expressions (e.g. "UPPER"("TRIM"(...)))
                 else:
                     d += f" DEFAULT {default}"
             col_defs.append(d)
