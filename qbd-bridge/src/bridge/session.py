@@ -334,7 +334,8 @@ class QBSession(Session):
                     d += " AUTO_INCREMENT"
                     auto_inc_col = col_name
                 elif def_lower in ("current timestamp", "utc timestamp", "current utc timestamp"):
-                    d += " DEFAULT CURRENT_TIMESTAMP"
+                    # MySQL requires expression defaults in parens for date columns
+                    d += " DEFAULT (CURRENT_DATE)" if mysql_type == "date" else " DEFAULT CURRENT_TIMESTAMP"
                 elif def_lower in ("current date", "current utc date"):
                     d += " DEFAULT CURRENT_DATE"
                 elif def_lower in ("current time", "utc time", "current utc time"):
