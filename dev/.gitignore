@@ -3,3 +3,4 @@ SQL-Anywhere-Reference.pdf
 *.qbw
 *.TLG
 *qbw*
+!quickbooks-schema.sql
