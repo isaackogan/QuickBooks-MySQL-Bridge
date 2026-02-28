@@ -257,6 +257,9 @@ else
         ${IGNORE_ARGS[@]+"${IGNORE_ARGS[@]}"} \
         --databases "$DB_NAME" \
     | awk -v dir="$CHECKPOINT_DIR" '
+        BEGIN {
+            preamble = dir "/000-preamble.sql"
+        }
         # Detect table boundary: "-- Table structure for table `name`"
         /^-- Table structure for table/ {
             # Previous table is now complete — mark it done
@@ -268,10 +271,8 @@ else
                 printf "[%d] %s - done\n", count, current_table > "/dev/stderr"
             }
             # Extract table name between backticks
-            line = $0
-            sub(/.*`/, "", line)
-            sub(/`.*/, "", line)
-            current_table = line
+            split($0, _parts, "`")
+            current_table = _parts[2]
             current_file = dir "/" current_table ".sql"
             in_table = 1
         }
@@ -279,7 +280,7 @@ else
             if (in_table) {
                 print > current_file
             } else {
-                print > dir "/000-preamble.sql"
+                print > preamble
             }
         }
         END {
@@ -290,7 +291,7 @@ else
                 count++
                 printf "[%d] %s - done\n", count, current_table > "/dev/stderr"
             }
-            close(dir "/000-preamble.sql")
+            close(preamble)
         }
     '
     DUMP_EXIT=${PIPESTATUS[0]}
