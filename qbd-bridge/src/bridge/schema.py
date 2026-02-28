@@ -66,20 +66,36 @@ ORDER BY ft.table_name, fk.role"""
 SCHEMA_CACHE_TTL = 300  # seconds
 
 
-def derive_database_name() -> str:
+def _derive_database_name() -> str:
     qbw = os.environ.get("QBW_FILE", "")
     if qbw:
         return os.path.splitext(os.path.basename(qbw))[0]
     return os.environ.get("SA17_DATABASE", "quickbooks")
 
 
-DATABASE_NAME = derive_database_name()
+DATABASE_NAME = _derive_database_name()
+
+
+def _build_qualifier_re(name: str) -> re.Pattern:
+    return re.compile(
+        rf'(?:\[{re.escape(name)}\]|"{re.escape(name)}"|`{re.escape(name)}`)\s*\.',
+        re.IGNORECASE,
+    )
+
 
 # Regex to strip database qualifier from transpiled SQL
-DB_QUALIFIER_RE = re.compile(
-    rf'(?:\[{re.escape(DATABASE_NAME)}\]|"{re.escape(DATABASE_NAME)}"|`{re.escape(DATABASE_NAME)}`)\s*\.',
-    re.IGNORECASE,
-)
+DB_QUALIFIER_RE = _build_qualifier_re(DATABASE_NAME)
+
+
+_db_name_resolved = False
+
+
+def set_database_name(name: str) -> None:
+    """Update the database name (called after querying SA17 on first connection)."""
+    global DATABASE_NAME, DB_QUALIFIER_RE, _db_name_resolved
+    DATABASE_NAME = name
+    DB_QUALIFIER_RE = _build_qualifier_re(name)
+    _db_name_resolved = True
 
 
 def build_info_schema(

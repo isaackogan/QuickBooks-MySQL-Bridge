@@ -15,9 +15,8 @@ from mysql_mimic.session import Session
 from mysql_mimic.types import ColumnType
 
 from .. import sa17_client
+from . import schema as _schema
 from .schema import (
-    DATABASE_NAME,
-    DB_QUALIFIER_RE,
     SCHEMA_SQL,
     INDEXES_SQL,
     FK_SQL,
@@ -48,7 +47,7 @@ class QBSession(Session):
 
     def __init__(self, credential_store: dict, connection_pool: sa17_client.ConnectionPool):
         super().__init__()
-        self.database = DATABASE_NAME
+        self.database = _schema.DATABASE_NAME
         self._credential_store = credential_store
         self._connection_pool = connection_pool
         self._sa17_conn = None
@@ -159,7 +158,7 @@ class QBSession(Session):
                 )
             if "CURRENTSCHEMA" in error_msg:
                 return (
-                    [(self.database or DATABASE_NAME,)],
+                    [(self.database or _schema.DATABASE_NAME,)],
                     [ResultColumn(name="DATABASE()", type=ColumnType.VARCHAR)],
                 )
             if "information_schema" in sql.lower():
@@ -197,7 +196,7 @@ class QBSession(Session):
                 name=col_name,
                 type=col_type,
                 table=table_name,
-                schema=DATABASE_NAME,
+                schema=_schema.DATABASE_NAME,
                 catalog="def",
             ))
 
@@ -215,7 +214,7 @@ class QBSession(Session):
             logger.warning("Could not load foreign keys: %s", e)
             fk_rows = []
 
-        result = build_info_schema(DATABASE_NAME, columns, index_rows, fk_rows)
+        result = build_info_schema(_schema.DATABASE_NAME, columns, index_rows, fk_rows)
         self._schema_cache = result
         self._schema_cache_time = now
         logger.info(
@@ -305,15 +304,57 @@ class QBSession(Session):
                 f"Table '{table_name}' doesn't exist",
                 code=ErrorCode.NO_SUCH_TABLE,
             )
+
+        # Query primary key columns for this table
+        pk_sql = (
+            "SELECT c.column_name"
+            " FROM sys.sysidx i"
+            " JOIN sys.sysidxcol ic ON i.table_id = ic.table_id AND i.index_id = ic.index_id"
+            " JOIN sys.systabcol c ON ic.table_id = c.table_id AND ic.column_id = c.column_id"
+            " JOIN sys.systab t ON i.table_id = t.table_id"
+            f" WHERE t.table_name = '{escaped_name}' AND i.index_category = 1"
+            " ORDER BY ic.sequence"
+        )
+        try:
+            pk_rows, _ = sa17_client.execute_query(conn, pk_sql)
+        except Exception:
+            pk_rows = []
+        pk_columns = [r[0] for r in pk_rows]
+
         col_defs = []
+        auto_inc_col = None
         for col_name, col_type, nulls, default, width, scale in rows:
             mysql_type = self._sa17_to_mysql_type(col_type, width, scale)
             d = f"  `{col_name}` {mysql_type}"
             if nulls == "N":
                 d += " NOT NULL"
             if default:
-                d += f" DEFAULT {default}"
+                def_lower = str(default).strip().lower()
+                if def_lower in ("autoincrement", "global autoincrement"):
+                    d += " AUTO_INCREMENT"
+                    auto_inc_col = col_name
+                elif def_lower == "current timestamp":
+                    d += " DEFAULT CURRENT_TIMESTAMP"
+                elif def_lower == "current date":
+                    d += " DEFAULT CURRENT_DATE"
+                elif def_lower == "current time":
+                    d += " DEFAULT CURRENT_TIME"
+                elif def_lower == "newid()":
+                    pass  # no MySQL equivalent, skip
+                else:
+                    d += f" DEFAULT {default}"
             col_defs.append(d)
+
+        if pk_columns:
+            col_defs.append(f"  PRIMARY KEY ({','.join(f'`{c}`' for c in pk_columns)})")
+            # MySQL requires AUTO_INCREMENT to be first in a key;
+            # if it's in a composite PK but not first, add a separate KEY
+            if auto_inc_col and pk_columns[0] != auto_inc_col:
+                col_defs.append(f"  KEY (`{auto_inc_col}`)")
+        elif auto_inc_col:
+            # No PK at all — MySQL requires AUTO_INCREMENT columns to be a key
+            col_defs.append(f"  KEY (`{auto_inc_col}`)")
+
         ddl = f"CREATE TABLE `{table_name}` (\n" + ",\n".join(col_defs) + "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         return (
             [(table_name, ddl)],
@@ -421,6 +462,18 @@ class QBSession(Session):
                 qb_pass = os.environ.get("QB_PASSWORD", "")
             self._sa17_creds = (qb_user, qb_pass)
             self._sa17_conn = self._connection_pool.acquire(qb_user, qb_pass)
+
+            # On first connection, query SA17 for the real database name
+            if not _schema._db_name_resolved:
+                try:
+                    rows, _ = sa17_client.execute_query(self._sa17_conn, "SELECT DB_PROPERTY('Name')")
+                    if rows and rows[0][0]:
+                        _schema.set_database_name(str(rows[0][0]))
+                        self.database = _schema.DATABASE_NAME
+                        logger.info("SA17 database name: %s", _schema.DATABASE_NAME)
+                except Exception as e:
+                    logger.warning("Could not query SA17 for database name: %s", e)
+
         return self._sa17_conn
 
     async def query(self, expression, sql: str, attrs) -> tuple:
@@ -440,7 +493,7 @@ class QBSession(Session):
 
         # Strip MySQL-specific comments (e.g. /*!40001 SQL_NO_CACHE */) and qualifiers
         sa17_sql = COMMENT_RE.sub("", sa17_sql).strip()
-        sa17_sql = DB_QUALIFIER_RE.sub("", sa17_sql)
+        sa17_sql = _schema.DB_QUALIFIER_RE.sub("", sa17_sql)
         sa17_sql = rewrite_offset_fetch(sa17_sql)
 
         logger.info("SA17 query: %s", sa17_sql)

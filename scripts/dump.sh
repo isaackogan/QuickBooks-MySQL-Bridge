@@ -255,7 +255,7 @@ else
         "${DUMP_CONN[@]}" \
         --verbose \
         ${IGNORE_ARGS[@]+"${IGNORE_ARGS[@]}"} \
-        --databases "$DB_NAME" \
+        "$DB_NAME" \
     | awk -v dir="$CHECKPOINT_DIR" '
         BEGIN {
             preamble = dir "/000-preamble.sql"
