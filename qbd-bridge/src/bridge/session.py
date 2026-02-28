@@ -269,7 +269,7 @@ class QBSession(Session):
         # varchar / char with width
         if "varchar" in name_lower or "nvarchar" in name_lower:
             w = width if width and width > 0 else 255
-            return f"varchar({w})"
+            return "text" if w > 4000 else f"varchar({w})"
         if "char" in name_lower or "nchar" in name_lower:
             w = width if width and width > 0 else 255
             return f"char({w})"
