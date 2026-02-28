@@ -1,0 +1,17 @@
+services:
+  qb-bridge:
+
+    # Image Name
+    image: "isaackogan/quickbooks-desktop-mysql-bridge:v0.0.1"
+
+    # Expose as MySQL Port
+    ports:
+      - "3306:3306"
+
+    # Mount a directory containing your QBW file
+    volumes:
+      - ./data:/data
+
+    # Set the file path of your QBW file
+    environment:
+      - QBW_FILE=/data/my-company-file.qbw

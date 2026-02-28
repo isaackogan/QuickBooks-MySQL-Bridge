@@ -1,0 +1,6 @@
+.credentials
+*.sql
+.DS_Store
+.venv/
+.idea/
+*.qbw
