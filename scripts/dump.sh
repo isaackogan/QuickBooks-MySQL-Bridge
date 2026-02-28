@@ -16,9 +16,14 @@ set -euo pipefail
 SKIP_AUDIT=false
 SKIP_TABLES=()
 RESUME_DIR=""
+SCHEMA_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --schema-only)
+            SCHEMA_ONLY=true
+            shift
+            ;;
         --skip-audit)
             SKIP_AUDIT=true
             shift
@@ -43,6 +48,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: bash dump.sh [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --schema-only          Dump table schemas only (no data)"
             echo "  --skip-audit           Skip large audit/history tables"
             echo "  --skip-table T1 T2...  Skip specific tables by name"
             echo "  --resume <dir>         Resume from a checkpoint directory"
@@ -169,6 +175,11 @@ DUMP_CONN=(
     --single-transaction
     --no-tablespaces
 )
+
+if [ "$SCHEMA_ONLY" = true ]; then
+    DUMP_CONN+=(--no-data)
+    echo "Schema-only mode: no data will be dumped."
+fi
 
 # --- Set up checkpoint directory ---
 if [[ -n "$RESUME_DIR" ]]; then
@@ -307,7 +318,11 @@ else
 fi
 
 # --- Assemble final output file ---
-OUTFILE="qb-dump-$(date +%Y-%m-%d).sql"
+if [ "$SCHEMA_ONLY" = true ]; then
+    OUTFILE="qb-dump-$(date +%Y-%m-%d)-no-data.sql"
+else
+    OUTFILE="qb-dump-$(date +%Y-%m-%d).sql"
+fi
 echo "Assembling final dump: $OUTFILE"
 
 {

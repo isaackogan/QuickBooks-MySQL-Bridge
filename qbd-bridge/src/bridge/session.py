@@ -329,31 +329,37 @@ class QBSession(Session):
             if nulls == "N":
                 d += " NOT NULL"
             if default:
-                def_lower = str(default).strip().lower()
+                def_lower = str(default).strip().lower().strip("()")
                 if def_lower in ("autoincrement", "global autoincrement"):
                     d += " AUTO_INCREMENT"
                     auto_inc_col = col_name
-                elif def_lower == "current timestamp":
+                elif def_lower in ("current timestamp", "utc timestamp", "current utc timestamp"):
                     d += " DEFAULT CURRENT_TIMESTAMP"
-                elif def_lower == "current date":
+                elif def_lower in ("current date", "current utc date"):
                     d += " DEFAULT CURRENT_DATE"
-                elif def_lower == "current time":
+                elif def_lower in ("current time", "utc time", "current utc time"):
                     d += " DEFAULT CURRENT_TIME"
                 elif def_lower == "newid()":
                     pass  # no MySQL equivalent, skip
+                elif "binary" in mysql_type and not def_lower.startswith("'") and not def_lower.startswith("0x"):
+                    pass  # skip invalid non-binary defaults for binary columns
                 else:
                     d += f" DEFAULT {default}"
             col_defs.append(d)
 
-        if pk_columns:
-            col_defs.append(f"  PRIMARY KEY ({','.join(f'`{c}`' for c in pk_columns)})")
-            # MySQL requires AUTO_INCREMENT to be first in a key;
-            # if it's in a composite PK but not first, add a separate KEY
-            if auto_inc_col and pk_columns[0] != auto_inc_col:
+        if auto_inc_col:
+            # AUTO_INCREMENT needs a key — use PRIMARY KEY if the auto-inc
+            # column is (or is first in) the SA17 PK, otherwise add a KEY
+            if pk_columns and pk_columns[0] == auto_inc_col:
+                col_defs.append(f"  PRIMARY KEY ({','.join(f'`{c}`' for c in pk_columns)})")
+            else:
+                # Emit SA17 PK as a plain index (data may have dupes)
+                if pk_columns:
+                    col_defs.append(f"  KEY ({','.join(f'`{c}`' for c in pk_columns)})")
                 col_defs.append(f"  KEY (`{auto_inc_col}`)")
-        elif auto_inc_col:
-            # No PK at all — MySQL requires AUTO_INCREMENT columns to be a key
-            col_defs.append(f"  KEY (`{auto_inc_col}`)")
+        elif pk_columns:
+            # No auto-increment — SA17 PK as plain index (data may have dupes)
+            col_defs.append(f"  KEY ({','.join(f'`{c}`' for c in pk_columns)})")
 
         ddl = f"CREATE TABLE `{table_name}` (\n" + ",\n".join(col_defs) + "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
         return (
