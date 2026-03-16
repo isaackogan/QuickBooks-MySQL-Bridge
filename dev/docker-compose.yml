@@ -1,8 +1,11 @@
 services:
   qb-bridge:
 
-    # Image Name
-    image: "isaackogan/quickbooks-desktop-mysql-bridge:v0.0.1"
+    # Build from local Dockerfile
+    build:
+      context: ../qbd-bridge
+      # args:
+      #   DB_CLIENT: mariadb  # or "mysql" — installs a DB client inside the container
 
     # Expose as MySQL Port
     ports:

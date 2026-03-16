@@ -8,6 +8,7 @@ set -euo pipefail
 #
 # Usage:
 #   bash dump.sh                          # dump everything
+#   bash dump.sh --mariadb                # force MariaDB client mode
 #   bash dump.sh --skip-audit             # skip audit/history tables
 #   bash dump.sh --skip-table FOO BAR     # skip specific tables
 #   bash dump.sh --resume <checkpoint>    # resume a previous crashed dump
@@ -17,9 +18,14 @@ SKIP_AUDIT=false
 SKIP_TABLES=()
 RESUME_DIR=""
 SCHEMA_ONLY=false
+USE_MARIADB=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --mariadb)
+            USE_MARIADB=true
+            shift
+            ;;
         --schema-only)
             SCHEMA_ONLY=true
             shift
@@ -48,6 +54,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: bash dump.sh [OPTIONS]"
             echo ""
             echo "Options:"
+            echo "  --mariadb              Force MariaDB client mode"
             echo "  --schema-only          Dump table schemas only (no data)"
             echo "  --skip-audit           Skip large audit/history tables"
             echo "  --skip-table T1 T2...  Skip specific tables by name"
@@ -62,30 +69,57 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# --- Check for mysqldump ---
-if ! command -v mysqldump &>/dev/null; then
-    echo "ERROR: mysqldump is not installed."
+# --- Detect DB_CLIENT env var ---
+if [[ "${DB_CLIENT:-}" == "mariadb" ]]; then
+    USE_MARIADB=true
+fi
+
+# --- Detect client binaries ---
+if [[ "$USE_MARIADB" == true ]]; then
+    # Forced MariaDB mode
+    MYSQL_CMD="mariadb"
+    MYSQLDUMP_CMD="mariadb-dump"
+elif command -v mysqldump &>/dev/null; then
+    # MySQL detected
+    MYSQL_CMD="mysql"
+    MYSQLDUMP_CMD="mysqldump"
+elif command -v mariadb-dump &>/dev/null; then
+    # MariaDB auto-detected
+    USE_MARIADB=true
+    MYSQL_CMD="mariadb"
+    MYSQLDUMP_CMD="mariadb-dump"
+else
+    echo "ERROR: No MySQL or MariaDB client found."
     echo ""
     case "$(uname -s)" in
         Darwin*)
             echo "Install with Homebrew:"
-            echo "  brew install mysql-client"
+            echo "  brew install mysql-client       # MySQL"
+            echo "  brew install mariadb             # or MariaDB"
             echo "  echo 'export PATH=\"/opt/homebrew/opt/mysql-client/bin:\$PATH\"' >> ~/.zshrc"
             ;;
         Linux*)
             echo "Install with your package manager:"
-            echo "  sudo apt-get install mysql-client"
-            echo "  # or"
-            echo "  sudo yum install mysql"
+            echo "  sudo apt-get install default-mysql-client   # MySQL"
+            echo "  sudo apt-get install mariadb-client          # or MariaDB"
             ;;
     esac
     exit 1
 fi
 
-# --- Check for mysql client (needed to discover database name) ---
-if ! command -v mysql &>/dev/null; then
-    echo "ERROR: mysql client is not installed (needed to discover the database name)."
+# Verify both commands exist
+if ! command -v "$MYSQLDUMP_CMD" &>/dev/null; then
+    echo "ERROR: $MYSQLDUMP_CMD is not installed."
     exit 1
+fi
+if ! command -v "$MYSQL_CMD" &>/dev/null; then
+    echo "ERROR: $MYSQL_CMD is not installed."
+    exit 1
+fi
+
+# Enable cleartext plugin via env var for MariaDB
+if [[ "$USE_MARIADB" == true ]]; then
+    export LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1
 fi
 
 # --- Interactive wizard (or restore from checkpoint config) ---
@@ -104,6 +138,17 @@ if [[ -n "$RESUME_DIR" ]]; then
     fi
     echo "Resuming from checkpoint: $RESUME_DIR"
     source "$RESUME_DIR/.config"
+    # Re-detect binaries + env after loading USE_MARIADB from config
+    if [[ "$USE_MARIADB" == true ]]; then
+        MYSQL_CMD="mariadb"
+        MYSQLDUMP_CMD="mariadb-dump"
+        export LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN=1
+        CLIENT_CONN=(-h "$HOST" -P "$PORT" -u "$USERNAME" --password="$PASSWORD" --ssl)
+    else
+        MYSQL_CMD="mysql"
+        MYSQLDUMP_CMD="mysqldump"
+        CLIENT_CONN=(-h "$HOST" -P "$PORT" -u "$USERNAME" --password="$PASSWORD" --ssl-mode=REQUIRED --enable-cleartext-plugin)
+    fi
     echo "  Host:     $HOST"
     echo "  Port:     $PORT"
     echo "  User:     $USERNAME"
@@ -123,12 +168,18 @@ else
     echo ""
     PASSWORD="${PASSWORD:-}"
 
+    # --- Build client connection flags (varies by MySQL vs MariaDB) ---
+    if [[ "$USE_MARIADB" == true ]]; then
+        CLIENT_CONN=(-h "$HOST" -P "$PORT" -u "$USERNAME" --password="$PASSWORD" --ssl)
+    else
+        CLIENT_CONN=(-h "$HOST" -P "$PORT" -u "$USERNAME" --password="$PASSWORD" --ssl-mode=REQUIRED --enable-cleartext-plugin)
+    fi
+
     # --- Discover database name ---
     echo ""
     echo "Connecting to discover database name..."
 
-    DB_NAME=$(mysql -h "$HOST" -P "$PORT" -u "$USERNAME" --password="$PASSWORD" \
-        --ssl-mode=REQUIRED --enable-cleartext-plugin \
+    DB_NAME=$("$MYSQL_CMD" "${CLIENT_CONN[@]}" \
         --skip-column-names --batch -e "SELECT DATABASE()" 2>/dev/null)
 
     if [ -z "$DB_NAME" ] || [ "$DB_NAME" = "NULL" ]; then
@@ -164,17 +215,16 @@ fi
 
 # --- Common mysqldump connection + compatibility args ---
 DUMP_CONN=(
-    -h "$HOST"
-    -P "$PORT"
-    -u "$USERNAME"
-    --password="$PASSWORD"
-    --ssl-mode=REQUIRED
-    --enable-cleartext-plugin
-    --set-gtid-purged=OFF
+    "${CLIENT_CONN[@]}"
     --skip-lock-tables
     --single-transaction
     --no-tablespaces
 )
+
+# MySQL-only: --set-gtid-purged is not supported by MariaDB
+if [[ "$USE_MARIADB" != true ]]; then
+    DUMP_CONN+=(--set-gtid-purged=OFF)
+fi
 
 if [ "$SCHEMA_ONLY" = true ]; then
     DUMP_CONN+=(--no-data)
@@ -195,6 +245,7 @@ PORT=$(printf '%q' "$PORT")
 USERNAME=$(printf '%q' "$USERNAME")
 PASSWORD=$(printf '%q' "$PASSWORD")
 DB_NAME=$(printf '%q' "$DB_NAME")
+USE_MARIADB=$(printf '%q' "$USE_MARIADB")
 CFGEOF
     chmod 600 "$CHECKPOINT_DIR/.config"
 fi
@@ -207,8 +258,7 @@ echo ""
 # --- Get list of tables ---
 echo "Fetching table list..."
 
-ALL_TABLES=$(mysql -h "$HOST" -P "$PORT" -u "$USERNAME" --password="$PASSWORD" \
-    --ssl-mode=REQUIRED --enable-cleartext-plugin \
+ALL_TABLES=$("$MYSQL_CMD" "${CLIENT_CONN[@]}" \
     --skip-column-names --batch -e \
     "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '${DB_NAME}'" 2>/dev/null)
 
@@ -258,11 +308,11 @@ if [[ $REMAINING -eq 0 ]]; then
     echo "All tables already checkpointed!"
 else
     # --- Run mysqldump for entire database, split output by table ---
-    echo "Running mysqldump (full database, streaming split by table)..."
+    echo "Running $MYSQLDUMP_CMD (full database, streaming split by table)..."
     echo ""
 
     set +eo pipefail
-    mysqldump \
+    "$MYSQLDUMP_CMD" \
         "${DUMP_CONN[@]}" \
         --verbose \
         ${IGNORE_ARGS[@]+"${IGNORE_ARGS[@]}"} \
@@ -310,7 +360,7 @@ else
 
     echo ""
     if [[ $DUMP_EXIT -ne 0 ]]; then
-        echo "ERROR: mysqldump failed (exit code $DUMP_EXIT)."
+        echo "ERROR: $MYSQLDUMP_CMD failed (exit code $DUMP_EXIT)."
         echo "Some tables may have been saved. Resume with:"
         echo "  bash dump.sh --resume $CHECKPOINT_DIR"
         exit 1

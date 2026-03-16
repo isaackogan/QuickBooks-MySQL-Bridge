@@ -13,13 +13,20 @@ ENV SQLANY_API_DLL="${SQLANY17}/lib64/libdbcapi_r.so"
 # Copy SA17 from stage 1
 COPY --from=sa17 /opt/sqlanywhere17 /opt/sqlanywhere17
 
+# Optional DB client for dump.sh (default: none)
+ARG DB_CLIENT=none
+
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     python3-pip \
     openssl \
+    $(if [ "$DB_CLIENT" = "mariadb" ]; then echo "mariadb-client"; \
+      elif [ "$DB_CLIENT" = "mysql" ]; then echo "default-mysql-client"; fi) \
     && rm -rf /var/lib/apt/lists/*
+
+ENV DB_CLIENT=${DB_CLIENT}
 
 # Generate self-signed SSL cert so clients send cleartext passwords over TLS
 RUN mkdir -p /app/certs && \

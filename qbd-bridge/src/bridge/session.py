@@ -74,14 +74,50 @@ class QBSession(Session):
         re.IGNORECASE,
     )
 
+    _DATABASE_CALL_RE = re.compile(r"\bDATABASE\s*\(\s*\)", re.IGNORECASE)
+    _ISCOLUMNS_NULLABLE_RE = re.compile(
+        r"\binformation_schema\s*\.\s*columns\b", re.IGNORECASE
+    )
+
     async def handle_query(self, sql, attrs):
         """Catch sqlglot executor errors for functions it cannot evaluate."""
+        logger.debug("Query: %s", sql[:200])
         sql = CAST_NULL_RE.sub("null", sql)
+
+        # Replace DATABASE() calls with the actual database name so sqlglot can evaluate them
+        db_name = self.database or _schema.DATABASE_NAME
+        if db_name and self._DATABASE_CALL_RE.search(sql):
+            escaped_db = db_name.replace("'", "''")
+            sql = self._DATABASE_CALL_RE.sub(f"'{escaped_db}'", sql)
+
+        # Wrap nullable INFORMATION_SCHEMA.COLUMNS fields that dump clients read
+        # via strstr/strcmp without null checks (causes mariadb-dump segfaults)
+        if self._ISCOLUMNS_NULLABLE_RE.search(sql):
+            for col in ("extra", "generation_expression"):
+                # Only replace in SELECT list (before FROM), not in WHERE/ORDER
+                sql = re.sub(
+                    rf"(?<=select\b)(.+?)(?=\bfrom\b)",
+                    lambda m: re.sub(
+                        rf"\b{col}\b",
+                        f"COALESCE({col}, '') AS {col}",
+                        m.group(0),
+                        count=1,
+                        flags=re.IGNORECASE,
+                    ),
+                    sql,
+                    count=1,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+
         clean = COMMENT_RE.sub("", sql).strip()
 
         # Silently no-op statements that mysqldump sends (SET, LOCK, FLUSH, etc.)
         if self._NOOP_RE.match(clean):
             return [], []
+
+        # MySQL/MariaDB clients send "select $" as a connection probe — return empty
+        if clean == "select $":
+            return [("$",)], [ResultColumn(name="$", type=ColumnType.VARCHAR)]
 
         # SHOW CREATE DATABASE -> return a simple CREATE DATABASE statement
         m_cdb = re.match(r"^\s*SHOW\s+CREATE\s+DATABASE\b.*?[`'\"]?(\w[\w-]*)[`'\"]?\s*;?\s*$", clean, re.IGNORECASE)
@@ -412,7 +448,7 @@ class QBSession(Session):
         rows = []
         for (tname,) in table_rows:
             rows.append((
-                tname, "SA17", "10", "Dynamic",
+                tname, "InnoDB", "10", "Dynamic",
                 "0", "0", "0", "0", "0", "0",
                 None, None, None, None,
                 "utf8mb4_general_ci", None, "", "",
@@ -425,6 +461,7 @@ class QBSession(Session):
         escaped_name = table_name.replace(chr(39), chr(39)+chr(39))
         sql = (
             "SELECT c.column_name, d.domain_name, c.\"nulls\", c.\"default\","
+            " c.width, c.scale,"
             " CASE WHEN ic.index_id IS NOT NULL THEN 'Y' ELSE 'N' END AS pkey"
             " FROM sys.systabcol c"
             " JOIN sys.systab t ON c.table_id = t.table_id"
@@ -448,10 +485,11 @@ class QBSession(Session):
             ResultColumn(name="Extra", type=ColumnType.VARCHAR),
         ]
         rows = []
-        for col_name, col_type, nulls, default, pkey in col_rows:
+        for col_name, col_type, nulls, default, width, scale, pkey in col_rows:
+            mysql_type = self._sa17_to_mysql_type(col_type, width, scale)
             rows.append((
                 col_name,
-                col_type,
+                mysql_type,
                 "YES" if nulls == "Y" else "NO",
                 "PRI" if pkey == "Y" else "",
                 str(default) if default else None,
